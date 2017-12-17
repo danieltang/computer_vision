@@ -2,13 +2,10 @@
 import argparse
 import cv2
 
-
-
 def apply_long_exposure_effect(input_video, output_img):
 
 	# initialize the Red, Green, and Blue channel averages, along with# the total number of frames read from the file
 	channels = None
-	(r_channel, g_channel, b_channel) = (None, None, None)
 	frames = 0
 
 	print("Opening video file ...")
