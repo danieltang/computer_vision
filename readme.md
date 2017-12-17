@@ -1,4 +1,4 @@
-#**Fun Projects on Computer Vison** 
+# **Fun Projects on Computer Vison** 
 
 ## Long Exposure Effect
 
