@@ -10,3 +10,42 @@ The output is shown below
 
 The second example is showing the silky smooth sea waves. The source video is downloaded at [videohive.net][https://videohive.net/item/waves-breaking-at-cathedral-rocks/19079293]. And the output is shown below
 ![Silky sea coast](./long_exposure_effect/results/waves.jpg)
+
+
+## Circle and Line Detection
+
+This is part of side project to automate the data collection process. The idea is to detect the compass heading based on the Maps screenshots only. 
+
+The original screenshot is shown below:
+
+![Smart phone maps screen shot](./heading_detection/results/maps_screenshots.png)
+
+There are a few challenges here:
+
+- The blue dot, which represent current location, is not always located at the center of the image. So pre-defining a ROI will not work
+- There are multiple circles with similar diameter in the screenshot, which makes filtering algorithm impossible by using certain diameter
+
+The final algorithm is designed as below:
+
+- Notice that the location dot and heading fan shape are in color blue. Lower and upper thresholds for filtering out blue color in HSV color space are defined as
+
+```python
+   # define threshold for blue region in HSV space
+    lower_blue = np.array([40,30,150])
+    upper_blue = np.array([180,220,255])
+```
+This works great, as the image shown below.
+![Filtering blue in HSV color space](./heading_detection/results/hsv_blue.png)
+
+- Then only H channel was extracted for further detection. After converting H channel to grayscale, a magnitude of gradient filter was applied. This essentially acts as a customized edge detector instead of calling Canny algorithm
+```python
+    gray_binary = mag_thresh(gray, sobel_kernel=3, thresh=(1, 80))
+```
+- After the edge is extracted, the standard HoughCircle() in OpenCV was called with following parameters
+```python
+    circles = cv2.HoughCircles(gray_binary*255,cv2.HOUGH_GRADIENT,1,20,
+                            param1=50,param2=30,minRadius=20,maxRadius=45)
+```
+- To further filter out other circles with the same size, a circle mask was first used, and the standard deviation of all pixels within the circle is used to determine if the circle is painted with pure color, or it has signs. The latter will result a higher standard deviation number than the former. In this way, the location dot is properly detected, as shown below for the second screenshot.
+![Detected circle](./heading_detection/results/circle_detected.png)
+
