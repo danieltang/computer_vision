@@ -1,14 +1,19 @@
 import cv2
 import numpy as np
 from scipy.ndimage.interpolation import geometric_transform
+from scipy.ndimage.measurements import label
 import matplotlib.pyplot as plt
 import argparse
 import math
 import sys
 import glob   
 import itertools
+from operator import itemgetter
+
+arc2deg = 180.0/math.pi
 
 def binary_it(input_img, thresh):
+
 	output_binary = np.zeros_like(input_img)
 	output_binary[(input_img >= thresh[0]) & (input_img <= thresh[1])] = 1
 	return output_binary
@@ -35,7 +40,6 @@ def mag_thresh(img, sobel_kernel=3, thresh=(0, 255)):
 	g_mag = np.sqrt(gx**2+gy**2)
 
 	scaled_g_mag = np.uint8(255*g_mag/np.max(g_mag))
-	# print(np.min(g_mag), np.max(g_mag), np.min(scaled_g_mag), np.max(scaled_g_mag))
 	return binary_it(scaled_g_mag, thresh)
 
 def dir_thresh(img, sobel_kernel=3, thresh=(0, np.pi/2)):
@@ -51,6 +55,7 @@ def dir_thresh(img, sobel_kernel=3, thresh=(0, np.pi/2)):
 	return binary_it(dir_grad, thresh)
 
 def show_images(cols, rows, images, titles=None, cmap=None):
+	n_imgs = len(images)
 	f, axarr = plt.subplots(rows, cols, figsize=(20,18))
 	if cmap == None:
 		cmap = 'gray'
@@ -67,6 +72,8 @@ def show_images(cols, rows, images, titles=None, cmap=None):
 		for ix in range(rows):
 			for iy in range(cols):
 				i = ix*cols+iy
+				if i >= n_imgs:
+					continue
 				axarr[ix, iy].imshow(images[i], cmap=cmap)
 				axarr[ix, iy].axis('off')
 				if titles is not None:
@@ -94,9 +101,7 @@ def detect_circle(img, title_str):
 	gray_binary = mag_thresh(gray, sobel_kernel=3, thresh=(1, 80))
 	circles = cv2.HoughCircles(gray_binary*255,cv2.HOUGH_GRADIENT,1,20,
 	                            param1=50,param2=30,minRadius=20,maxRadius=45)
-	xc = -1
-	yc = -1
-	rc = -1
+	xc, yc, rc = -1, -1, -1
 	if circles is not None:
 		circles = np.uint16(np.around(circles))
 		for i in circles[0,:]:
@@ -113,7 +118,6 @@ def detect_circle(img, title_str):
 	return (img, gray_binary, [xc, yc, rc])
 
 def detect_lines(background_img, img, minLineLength=6, maxLineGap=8):
-
 	# Apply edge detection method on the image
 	add_line_to_img = background_img.copy()
 	lines = None
@@ -200,15 +204,16 @@ def find_longest_ones(arr):
 	return (left_index, right_index)
 
 def apply_circle_mask(img, xc, yc, rcutoff):
-	rows, cols = img.shape
-	# b_img = binary_it(img, [10, 255])*255
-	thresh = 0.0175 # 1deg
-	for i in range(cols):
-		for j in range(rows):
-			dy = j-yc
-			dx = i-xc
-			if math.hypot(dx, dy) > rcutoff:
-				img[j,i] = 0
+	if img is not None:
+		rows, cols = img.shape
+		# b_img = binary_it(img, [10, 255])*255
+		thresh = 0.0175 # 1deg
+		for i in range(cols):
+			for j in range(rows):
+				dy = j-yc
+				dx = i-xc
+				if math.hypot(dx, dy) > rcutoff:
+					img[j,i] = 0
 	return img
 
 def crop_image(centerxy, margin, ori_img):
@@ -221,6 +226,135 @@ def crop_image(centerxy, margin, ori_img):
 	except:
 		img = ori_img[h1:h2, w1:w2].copy()
 	return img
+
+def cluster_lines(lines, center):
+	# assume lines are already sorted by distance from center, and segment length
+	(r, c) = lines.shape
+	start_idx = 0
+	end_idx = 0
+	clusters = []
+	for k in range(r):
+		if end_idx+1>r-1:
+			break
+		if (abs(lines[end_idx+1,0]-lines[start_idx,0])<0.1 and abs(lines[end_idx+1,2]-lines[start_idx,2])<10):
+			end_idx += 1
+			if end_idx >= r-1:
+				clusters.append([start_idx, end_idx])
+		else:
+			if end_idx>=start_idx:
+				clusters.append([start_idx, end_idx])
+			else:
+				clusters.append([start_idx, start_idx])
+
+			start_idx = k+1
+			end_idx = start_idx
+
+	clustered_lines = []
+	for c in clusters:
+		xx = np.concatenate([lines[c[0]:(c[1]+1), 3], lines[c[0]:(c[1]+1), 5]])
+		yy = np.concatenate([lines[c[0]:(c[1]+1), 4], lines[c[0]:(c[1]+1), 6]])
+		left, top, right, bottom = np.min(xx), np.min(yy), np.max(xx), np.max(yy)
+		# extend x1, y1, x2, y2
+		# pick up the first representive segment
+		x1, y1, x2, y2 = lines[c[0], 3], lines[c[0], 4], lines[c[0], 5], lines[c[0], 6]
+		dx = x2-x1
+		dy = y2-y1
+		scaling_factor = 100
+		dx = dx*scaling_factor
+		dy = dy*scaling_factor
+		# extend by scaling factor
+		xx1 = x2 + dx
+		yy1 = y2 + dy
+		xx2 = x2 - dx
+		yy2 = y2 - dy
+		clipped_line = liangbarsky(left, top, right, bottom, xx1, yy1, xx2, yy2)
+		if (clipped_line[0] is None):
+			continue
+		clustered_lines.append(clipped_line)
+	return clustered_lines
+
+def liangbarsky(xmin, ymin, xmax, ymax, x1, y1, x2, y2):
+	# defining variables
+	p1 = -(x2 - x1)
+	p2 = -p1
+	p3 = -(y2 - y1)
+	p4 = -p3
+
+	q1 = x1 - xmin
+	q2 = xmax - x1
+	q3 = y1 - ymin
+	q4 = ymax - y1
+
+	posarr=[]
+	negarr=[]
+	posarr.append(1)
+	negarr.append(0)
+
+	if ((p1 == 0 and q1 < 0) or (p3 == 0 and q3 < 0)):
+		print("Line is parallel to clipping window!")
+		return None
+
+	if (p1 != 0):
+		r1 = q1 / p1
+		r2 = q2 / p2
+		if (p1 < 0):
+			negarr.append(r1) # for negative p1, add it to negative array
+			posarr.append(r2) # and add p2 to positive array
+		else:
+			negarr.append(r2)
+			posarr.append(r1)
+
+	if (p3 != 0):
+		r3 = q3 / p3
+		r4 = q4 / p4
+		if (p3 < 0):
+			negarr.append(r3)
+			posarr.append(r4)
+		else:
+			negarr.append(r4)
+			posarr.append(r3)
+
+	rn1 = np.max(negarr) # maximum of negative array
+	rn2 = np.min(posarr) # minimum of positive array
+
+	xn1 = int(x1 + p2 * rn1)
+	yn1 = int(y1 + p4 * rn1) # computing new points
+	xn2 = int(x1 + p2 * rn2)
+	yn2 = int(y1 + p4 * rn2)
+
+	return xn1, yn1, xn2, yn2
+
+def find_primary_road(lines, center):
+	# first find the longest lines
+	angle_thresh = 2.0*np.pi/180
+	dist_thresh = 10
+	ordered_lines = []
+	if lines is not None:
+		for k in range(len(lines)):
+			for x1,y1,x2,y2 in lines[k]:
+				dx = x2 - x1
+				dy = y2 - y1
+				seg_length = math.sqrt(dx*dx+dy*dy)
+				dist_from_origin = abs(x2*y1-y2*x1)/seg_length
+				dist_from_center = abs(dy*center[0]-dx*center[1]+x2*y1-y2*x1)/seg_length
+				theta = np.arctan2(dy, dx)
+				ordered_lines.append([theta, dist_from_origin, dist_from_center, x1, y1, x2, y2, seg_length, k])
+	sorted_lines = sorted(ordered_lines, key=lambda x: x[7])[-16:] # first sort with seg length
+	sorted_lines = sorted(ordered_lines, key=lambda x: x[2])[:16] # then sort with dist_from_origin
+	clustered_lines = cluster_lines(np.array(sorted_lines), center)
+
+	# print("current lines")
+	# print(sorted_lines)
+	primary_line = []
+	for s in clustered_lines:
+		dx = s[2]-s[0]
+		dy = s[3]-s[1]
+		segl2 = dx*dx+dy*dy
+		if segl2 < 400:
+			continue
+		primary_line = s
+		break
+	return primary_line
 
 def parse_arguments():
 	parser = argparse.ArgumentParser(description='Pipeline for heading detection')
@@ -242,18 +376,16 @@ def main():
 
 	# read first n images and show the blue color thresholds
 	index = 0
-	ori_demos = []
 	direction_demos = []
 	road_demos = []
-	n_demos = 6
+	n_demos = len(files)
 	margin = 300
-
+	results = []
 	for image_file in files:
 		image = cv2.imread(image_file)
 		(img_h, img_w, _) = image.shape
 		# first make a copy of cropped original image to speed up, by assuming blue dot is within center region
 		img = crop_image([0.5*img_h, 0.5*img_w], margin, image)
-		ori_demos.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 		# add blur filter
 		img = cv2.GaussianBlur(img, (3,3), 0)
 		# Convert BGR to HSV
@@ -264,21 +396,18 @@ def main():
 		hsv_blue = cv2.bitwise_and(hsv, hsv, mask= blue_mask)
 
 		(hsv_blue_circles, hsv_blue_circles_binary, center) = detect_circle(hsv_blue.copy(), image_file)
-
 		original_center = center.copy()
 
 		if (center[0]<=0 or center[1]<=0):
 			print("No circle detected for {} ...".format(image_file))
 			continue
 
-		half_margin = margin//2
+		half_margin = int(margin/1.5)
 		# crop image based on detected circle center
 		h_channel = crop_image([center[1], center[0]], half_margin, hsv_blue[:,:,0])
 		cimg = crop_image([center[1], center[0]], half_margin, img)
 		# update center coords
 		center[0] = center[1] = half_margin
-
-		# show_images(2,1,[hsv_blue, h_channel])
 
 		# further process with h channel
 		h_channel = cv2.medianBlur(h_channel, 5)
@@ -288,6 +417,10 @@ def main():
 
 		## method 1: detecting lines
 		# detect lines and filter non-tangiential ones
+		if cimg is None or h_channel is None:
+			print("Reading Error")
+			continue
+
 		_, _, lines = detect_lines(cimg, h_channel)
 		direction_marked_img = filter_lines(center, lines, cimg)
 
@@ -303,18 +436,48 @@ def main():
 		# crop img to center the circle
 		img = crop_image([original_center[1], original_center[0]], half_margin, img)
 		img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+		img2 = img.copy()
+		hls_img = cv2.cvtColor(img, cv2.COLOR_RGB2HLS)
+		l_channel = binary_it(cv2.GaussianBlur(hls_img[:,:,1],(3,3),5), [240, 255])
+		# filter out island with a threshold of num_of_pixels_thresh
+		labels = label(l_channel)
+		num_of_pixels_thresh = 1000
+		for idx in range(1, labels[1] + 1):
+			# Find pixels with each label value
+			nonzero = (labels[0] == idx).nonzero()
+			nonzerox = np.array(nonzero[0])
+			n_size = len(nonzerox)
+			if n_size < num_of_pixels_thresh:
+				labels[0][nonzero] = 0
+			else:
+				labels[0][nonzero] = 1
+		l_channel = labels[0].copy()
+		l_channel = np.float32(l_channel)
+		l_mag_binary = mag_thresh(l_channel, sobel_kernel=3, thresh=(200,300))*255
+
 		b_channel = cv2.bitwise_not(binary_it(cv2.GaussianBlur(img[:,:,2],(3,3),5), [210, 250]))*255
 		b_mag_binary = mag_thresh(b_channel, sobel_kernel=3, thresh=(200, 300))*255
-		img_with_lines, edges, lines = detect_lines(img, b_mag_binary, 60, 10)
-		road_demos.append(img_with_lines)
 
+		img_with_lines0, edges, lines = detect_lines(img, l_mag_binary, 40, 6)
+		primary_line = find_primary_road(lines, center)
+		road_theta = np.arctan2(primary_line[3]-primary_line[1], primary_line[2]-primary_line[0])
+		e1 = abs(np.arctan2(np.sin(road_theta-theta), np.cos(road_theta-theta)))
+		e2 = abs(np.arctan2(np.sin(np.pi+road_theta-theta), np.cos(np.pi+road_theta-theta)))
+		wrapped_error = np.min([e1, e2])
+		cv2.line(direction_marked_img, (primary_line[0], primary_line[1]), (primary_line[2], primary_line[3]), (0,0,255),4)
+
+		results.append([index, image_file, int(theta*arc2deg), int(road_theta*arc2deg), int(wrapped_error*arc2deg)])
 		index += 1
+
 		if index >= n_demos:
 			break
-	n_cols = 3
-	show_images(n_cols, n_demos//n_cols, ori_demos)
-	show_images(n_cols, n_demos//n_cols, direction_demos)
-	show_images(n_cols, n_demos//n_cols, road_demos)
+	titles = []
+	for r in results:
+		print(r)
+		titles.append("IMG # {}, Heading Error {}".format(r[0], r[4]))
+
+	n_cols = 6
+	show_images(n_cols, (index-1)//n_cols+1, direction_demos, titles)
 
 if __name__ == '__main__':
 	main()
